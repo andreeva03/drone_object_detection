@@ -1,0 +1,7 @@
+{
+  "name": "VisionDetect AI",
+  "description": "Advanced aerial object detection and analysis dashboard.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
