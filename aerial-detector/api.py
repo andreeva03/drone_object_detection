@@ -34,26 +34,42 @@ app.add_middleware(
 )
 
 # Configuration
-UPLOAD_DIR = Path("uploads")
-OUTPUT_DIR = Path("outputs")
+BASE_DIR = Path(__file__).resolve().parent
+UPLOAD_DIR = BASE_DIR / "uploads"
+OUTPUT_DIR = BASE_DIR / "outputs"
+MODEL_PATH = BASE_DIR / "model" / "best.pt"
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Load model on startup (you can change the path)
+PERSON_CLASS_NAMES = {"person", "pedestrian", "people"}
+VEHICLE_CLASS_NAMES = {
+    "vehicle",
+    "car",
+    "van",
+    "truck",
+    "bus",
+    "motor",
+    "bicycle",
+    "tricycle",
+    "awning-tricycle",
+}
+
+# Load model on startup
 model = None
 
 
 @app.on_event("startup")
 async def startup_event():
     global model
-    # Try to load a trained model, fall back to yolov8n if not found
-    model_path = "outputs/train/weights/best.pt"
-    if not Path(model_path).exists():
-        model_path = "yolov8n.pt"
+    model_path = MODEL_PATH
+    if not model_path.exists():
+        fallback_path = BASE_DIR / "yolov8n.pt"
+        model_path = fallback_path if fallback_path.exists() else MODEL_PATH
     print(f"Loading model from: {model_path}")
     try:
-        model = YOLO(model_path)
+        model = YOLO(str(model_path))
         print("Model loaded successfully")
+        print(f"Model classes: {model.names}")
     except Exception as e:
         print(f"Warning: Could not load model: {e}")
         print("Detection will fail until a valid model is available")
@@ -143,17 +159,17 @@ async def detect_image(
                 confidence = float(b.conf.item())
                 x1, y1, x2, y2 = [float(x) for x in b.xyxy.squeeze().tolist()]
 
-                class_name = model.names.get(cls_id, str(cls_id))
+                class_name = model.names.get(cls_id, str(cls_id)).lower()
 
-                # Map to frontend classes
-                if class_name == "person":
+                # Map VisDrone and YOLO classes into the app categories
+                if class_name in PERSON_CLASS_NAMES:
                     class_label = "Person"
                     summary["person"] += 1
-                elif class_name == "vehicle":
+                elif class_name in VEHICLE_CLASS_NAMES:
                     class_label = "Vehicle"
                     summary["vehicle"] += 1
                 else:
-                    class_label = "Other"
+                    class_label = class_name.title()
 
                 detections.append(
                     {
@@ -176,11 +192,7 @@ async def detect_image(
             "timestamp": str(uuid.uuid4()),  # TODO: use actual timestamp
             "originalImageUrl": f"/api/images/original/{detection_id}{ext}",
             "annotatedImageUrl": f"/api/images/annotated/{detection_id}_annotated.jpg",
-            "summary": {
-                "people": summary["person"],
-                "vehicles": summary["vehicle"],
-                "total": summary["total"],
-            },
+            "summary": summary,
             "detections": detections,
         }
 
@@ -216,6 +228,29 @@ async def get_annotated_image(filename: str):
     return FileResponse(file_path)
 
 
+def normalize_result_format(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert old format results to new format with VisDrone labels."""
+    # If already in new format, return as-is
+    if isinstance(data.get("summary"), dict) and "classes" in data["summary"]:
+        return data
+    
+    # Convert old format (person/vehicle counts) to new format (classes dict)
+    if isinstance(data.get("summary"), dict) and ("person" in data["summary"] or "vehicle" in data["summary"]):
+        # Recount detections by class to get accurate class dict
+        class_counts: Dict[str, int] = {}
+        for det in data.get("detections", []):
+            cls = det.get("class", "Other")
+            class_counts[cls] = class_counts.get(cls, 0) + 1
+        
+        total = len(data.get("detections", []))
+        data["summary"] = {
+            "total": total,
+            "classes": class_counts,
+        }
+    
+    return data
+
+
 @app.get("/api/history")
 async def get_history():
     """Get detection history (list of past results)."""
@@ -226,6 +261,7 @@ async def get_history():
         try:
             with open(result_file) as f:
                 data = json.load(f)
+                data = normalize_result_format(data)
                 # Return minimal data for list view
                 history.append(
                     {
@@ -235,9 +271,11 @@ async def get_history():
                         "summary": data["summary"],
                     }
                 )
-        except Exception:
+        except Exception as e:
+            print(f"Error loading history item {result_file}: {e}")
             continue
 
+    print(f"History endpoint returning {len(history)} items")
     return history
 
 
@@ -249,7 +287,9 @@ async def get_result(detection_id: str):
         raise HTTPException(status_code=404, detail="Result not found")
 
     with open(result_path) as f:
-        return json.load(f)
+        data = json.load(f)
+        data = normalize_result_format(data)
+        return data
 
 
 @app.get("/api/health")

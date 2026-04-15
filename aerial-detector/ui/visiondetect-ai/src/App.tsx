@@ -21,7 +21,7 @@ import { DetectionResult, ViewState, Detection } from './types';
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 // Mock mode - set to true for UI preview without backend
-const USE_MOCK = true;
+const USE_MOCK = false;
 
 // Mock Data for demo
 const MOCK_RESULT: DetectionResult = {
@@ -401,6 +401,26 @@ const downloadResults = (result: DetectionResult) => {
   linkElement.click();
 };
 
+const normalizeResultUrls = (result: DetectionResult): DetectionResult => ({
+  ...result,
+  originalImageUrl: result.originalImageUrl.startsWith('http')
+    ? result.originalImageUrl
+    : `${API_BASE_URL}${result.originalImageUrl}`,
+  annotatedImageUrl: result.annotatedImageUrl.startsWith('http')
+    ? result.annotatedImageUrl
+    : `${API_BASE_URL}${result.annotatedImageUrl}`,
+});
+
+interface HistoryItem {
+  id: string;
+  timestamp: string;
+  thumbnailUrl: string;
+  summary: {
+    total: number;
+    classes: Record<string, number>;
+  };
+}
+
 function ResultsView({ result }: { result: DetectionResult }) {
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const [lightboxLabel, setLightboxLabel] = useState<string>('');
@@ -416,20 +436,23 @@ function ResultsView({ result }: { result: DetectionResult }) {
     setLightboxLabel('');
   };
 
+  const classCounts = result.detections.reduce((acc: Record<string, number>, det) => {
+    acc[det.class] = (acc[det.class] ?? 0) + 1;
+    return acc;
+  }, {});
+
   // Filter detections based on selected class
   const filteredDetections = result.detections.filter(det => {
     if (filterClass === 'All Classes') return true;
-    if (filterClass === 'Vehicles') return det.class === 'Vehicle';
-    if (filterClass === 'People') return det.class === 'Person';
-    return true;
+    return det.class === filterClass;
   });
 
   // Calculate filtered counts
   const filteredCounts = {
-    people: filteredDetections.filter(d => d.class === 'Person').length,
-    vehicles: filteredDetections.filter(d => d.class === 'Vehicle').length,
-    total: filteredDetections.length
+    total: filteredDetections.length,
   };
+
+  const classOptions = ['All Classes', ...Object.keys(classCounts)];
 
   return (
     <div className="p-6 sm:p-8 lg:p-12 space-y-6 max-w-7xl mx-auto">
@@ -524,10 +547,16 @@ function ResultsView({ result }: { result: DetectionResult }) {
             </span>
           )}
         </h2>
-        <div className="grid grid-cols-3 gap-3">
-          <SummaryCard icon={<Users className="text-blue-500" />} value={filteredCounts.people} label="PEOPLE" />
-          <SummaryCard icon={<Car className="text-blue-500" />} value={filteredCounts.vehicles} label="VEHICLES" />
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <SummaryCard icon={<BarChart3 className="text-blue-500" />} value={filteredCounts.total} label="TOTAL" />
+          {Object.entries(classCounts).slice(0, 2).map(([label, count]) => (
+            <SummaryCard
+              key={label}
+              icon={<Car className="text-blue-500" />}
+              value={count}
+              label={label.toUpperCase()}
+            />
+          ))}
         </div>
       </section>
 
@@ -540,9 +569,9 @@ function ResultsView({ result }: { result: DetectionResult }) {
             onChange={(e) => setFilterClass(e.target.value)}
             className="bg-gray-50 border border-gray-200 rounded-lg px-2 py-1 text-sm outline-none cursor-pointer hover:bg-gray-100 transition-colors"
           >
-            <option>All Classes</option>
-            <option>Vehicles</option>
-            <option>People</option>
+            {classOptions.map((cls) => (
+              <option key={cls}>{cls}</option>
+            ))}
           </select>
         </div>
 
@@ -561,7 +590,9 @@ function ResultsView({ result }: { result: DetectionResult }) {
                   <tr key={det.id} className="hover:bg-gray-50 transition-colors">
                     <td className="px-4 py-3">
                       <span className={`px-2 py-1 rounded-md text-xs font-bold ${
-                        det.class === 'Vehicle' ? 'bg-blue-50 text-blue-600' : 'bg-red-50 text-red-600'
+                        det.class.toLowerCase().includes('person') || det.class.toLowerCase().includes('pedestrian')
+                          ? 'bg-red-50 text-red-600'
+                          : 'bg-blue-50 text-blue-600'
                       }`}>
                         {det.class}
                       </span>
@@ -604,31 +635,117 @@ function SummaryCard({ icon, value, label }: { icon: React.ReactNode, value: num
 }
 
 function HistoryView({ onSelect }: { onSelect: (res: DetectionResult) => void }) {
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const loadHistory = async () => {
+      setLoading(true);
+      setError(null);
+
+      try {
+        console.log('Fetching history from:', `${API_BASE_URL}/api/history`);
+        const response = await fetch(`${API_BASE_URL}/api/history`);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: Failed to load history`);
+        }
+        const data: HistoryItem[] = await response.json();
+        console.log('History data received:', data);
+        setHistory(
+          data.map((item) => ({
+            ...item,
+            thumbnailUrl: item.thumbnailUrl.startsWith('http')
+              ? item.thumbnailUrl
+              : `${API_BASE_URL}${item.thumbnailUrl}`,
+          }))
+        );
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : 'Unable to load history';
+        console.error('History loading error:', errorMsg);
+        setError(errorMsg);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadHistory();
+  }, []);
+
+  const handleSelect = async (id: string) => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/results/${id}`);
+      if (!response.ok) {
+        throw new Error('Failed to load result');
+      }
+      const result: DetectionResult = normalizeResultUrls(await response.json());
+      onSelect(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load result');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="p-6 sm:p-8 lg:p-12 space-y-4 max-w-7xl mx-auto">
-      <h2 className="text-xl font-bold mb-4">Past Detections</h2>
-      {[1, 2, 3].map((i) => (
-        <div 
-          key={i} 
-          onClick={() => onSelect(MOCK_RESULT)}
-          className="flex items-center gap-4 p-4 bg-white border border-gray-100 rounded-2xl hover:border-blue-200 cursor-pointer transition-all hover:shadow-md"
-        >
-          <img 
-            src={`https://picsum.photos/seed/hist${i}/200/200`} 
-            className="w-16 h-16 rounded-xl object-cover" 
-            referrerPolicy="no-referrer"
-          />
-          <div className="flex-1">
-            <h4 className="font-semibold text-gray-900">Detection #{1000 + i}</h4>
-            <p className="text-xs text-gray-500">March {i + 1}, 2026 • 14:20</p>
-            <div className="flex gap-2 mt-2">
-              <span className="text-[10px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded font-bold">48 VEHICLES</span>
-              <span className="text-[10px] bg-red-50 text-red-600 px-1.5 py-0.5 rounded font-bold">12 PEOPLE</span>
-            </div>
-          </div>
-          <ChevronRight className="w-5 h-5 text-gray-300" />
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-bold mb-1">Detection History</h2>
+          <p className="text-sm text-gray-500">Review previous image detections and reopen any result.</p>
         </div>
-      ))}
+        {loading && <span className="text-sm text-gray-500">Loading…</span>}
+      </div>
+
+      {error && (
+        <div className="p-4 bg-red-50 border border-red-200 rounded-xl text-red-600 text-sm">
+          {error}
+        </div>
+      )}
+
+      {history.length === 0 && !loading ? (
+        <div className="p-10 bg-white border border-gray-100 rounded-3xl text-center text-gray-500">
+          No history available yet. Run a detection to save results.
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {history.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => handleSelect(item.id)}
+              className="w-full text-left flex items-center gap-4 p-4 bg-white border border-gray-100 rounded-2xl hover:border-blue-200 hover:shadow-md transition-all"
+            >
+              <img
+                src={item.thumbnailUrl}
+                alt={`History ${item.id}`}
+                className="w-20 h-20 rounded-2xl object-cover"
+              />
+              <div className="flex-1">
+                <div className="flex items-center justify-between gap-4">
+                  <h4 className="font-semibold text-gray-900">Detection {item.id}</h4>
+                  <span className="text-xs text-gray-500">
+                    {new Date(item.timestamp).toLocaleString() !== 'Invalid Date' 
+                      ? new Date(item.timestamp).toLocaleString() 
+                      : item.timestamp.substring(0, 8)}
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2 mt-3 text-[10px] font-bold uppercase">
+                  {item.summary.classes && Object.entries(item.summary.classes).slice(0, 2).map(([label, count]: [string, any]) => (
+                    <span key={label} className="bg-blue-50 text-blue-600 px-2 py-1 rounded-full">
+                      {count} {label}
+                    </span>
+                  ))}
+                  <span className="bg-gray-50 text-gray-600 px-2 py-1 rounded-full">{item.summary.total} total</span>
+                </div>
+              </div>
+              <ChevronRight className="w-5 h-5 text-gray-300" />
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

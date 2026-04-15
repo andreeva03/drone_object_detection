@@ -1,6 +1,6 @@
 export interface Detection {
   id: string;
-  class: 'Vehicle' | 'Person' | 'Other';
+  class: string;
   confidence: number;
   bbox: [number, number, number, number]; // x1, y1, x2, y2
 }
@@ -11,9 +11,8 @@ export interface DetectionResult {
   originalImageUrl: string;
   annotatedImageUrl: string;
   summary: {
-    people: number;
-    vehicles: number;
     total: number;
+    classes: Record<string, number>;
   };
   detections: Detection[];
 }
